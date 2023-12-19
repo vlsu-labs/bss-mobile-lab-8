@@ -1,152 +1,264 @@
 package com.example.bss_mobile_lab_8
 
-
-import android.graphics.Matrix
-import android.graphics.RectF
-import android.hardware.Camera
-
-import android.hardware.Camera.CameraInfo
-import android.hardware.Camera.Size
+import android.Manifest
+import android.content.ContentValues
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
-import android.view.Display
-import android.view.Surface
-import android.view.SurfaceHolder
+import android.provider.MediaStore
+import androidx.appcompat.app.AppCompatActivity
+import androidx.camera.core.ImageCapture
+import androidx.camera.video.Recorder
+import androidx.camera.video.Recording
+import androidx.camera.video.VideoCapture
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
+import com.example.bss_mobile_lab_8.databinding.MainLayoutBinding
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.core.Preview
+import androidx.camera.core.CameraSelector
+import android.util.Log
+import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.ImageCaptureException
+import androidx.camera.core.ImageProxy
+import androidx.camera.video.FallbackStrategy
+import androidx.camera.video.MediaStoreOutputOptions
+import androidx.camera.video.Quality
+import androidx.camera.video.QualitySelector
+import androidx.camera.video.VideoRecordEvent
+import androidx.core.content.PermissionChecker
+import java.nio.ByteBuffer
+import java.text.SimpleDateFormat
+import java.util.Locale
 
-import android.view.SurfaceView
-import android.view.Window
-import android.view.WindowManager
-import androidx.activity.ComponentActivity
-import androidx.activity.compose.setContent
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.tooling.preview.Preview
-import com.example.bss_mobile_lab_8.ui.theme.Bssmobilelab8Theme
-import java.io.IOException
+typealias LumaListener = (luma: Double) -> Unit
 
-class MainActivity : ComponentActivity() {
+class MainActivity : AppCompatActivity() {
+    private lateinit var viewBinding: MainLayoutBinding
 
-    var sv: SurfaceView? = null
-    var sh: SurfaceHolder? = null
-    var holder: HolderCallback? = null
-    var camera: Camera? = null
+    private var imageCapture: ImageCapture? = null
 
-    val cameraId: Int = 1
-    val isFullScreen: Boolean = true
+    private var videoCapture: VideoCapture<Recorder>? = null
+    private var recording: Recording? = null
+
+    private lateinit var cameraExecutor: ExecutorService
+
+    private val activityResultLauncher =
+        registerForActivityResult(
+            ActivityResultContracts.RequestMultiplePermissions())
+        { permissions ->
+            // Handle Permission granted/rejected
+            var permissionGranted = true
+            permissions.entries.forEach {
+                if (it.key in REQUIRED_PERMISSIONS && it.value == false)
+                    permissionGranted = false
+            }
+            if (!permissionGranted) {
+                Toast.makeText(baseContext,
+                    "Permission request denied",
+                    Toast.LENGTH_SHORT).show()
+            } else {
+                startCamera()
+            }
+        }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        viewBinding = MainLayoutBinding.inflate(layoutInflater)
+        setContentView(viewBinding.root)
 
-        requestWindowFeature(Window.FEATURE_NO_TITLE)
-
-        window.setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN, WindowManager.LayoutParams.FLAG_FULLSCREEN)
-
-        setContentView(R.layout.view_layout)
-
-        sv = findViewById(R.id.surfaceView2)
-        sh = sv!!.holder
-
-        sh!!.setType(SurfaceHolder.SURFACE_TYPE_PUSH_BUFFERS)
-
-        var callBack: HolderCallback = HolderCallback(this)
-        sh!!.addCallback(callBack)
-    }
-
-    override fun onResume() {
-        super.onResume()
-        camera = Camera.open(cameraId)
-        setPreviewSize(isFullScreen)
-    }
-
-    private fun setPreviewSize(isFullScreen: Boolean) {
-        var display: Display = windowManager.defaultDisplay
-        var widthIsMax = display.width > display.height
-
-        var size: Size = camera?.parameters?.previewSize!!
-
-        var rectDisplay: RectF = RectF()
-        var rectPreview: RectF = RectF()
-
-        rectDisplay.set(0F, 0F, display.width.toFloat(), display.height.toFloat())
-
-        if (widthIsMax) {
-            rectPreview.set(0F, 0F, size.width.toFloat(), size.height.toFloat())
+        // Request camera permissions
+        if (allPermissionsGranted()) {
+            startCamera()
         } else {
-            rectPreview.set(0F, 0F, size.height.toFloat(), size.width.toFloat())
+            requestPermissions()
         }
 
-        var matrix: Matrix = Matrix()
+        // Set up the listeners for take photo and video capture buttons
+        viewBinding.imageCaptureButton.setOnClickListener { takePhoto() }
+        viewBinding.videoCaptureButton.setOnClickListener { captureVideo() }
 
-        if (!isFullScreen) {
-            matrix.setRectToRect(rectPreview, rectDisplay, Matrix.ScaleToFit.START)
-        } else {
-            matrix.setRectToRect(rectDisplay, rectPreview, Matrix.ScaleToFit.START)
-            matrix.invert(matrix)
-        }
-
-        matrix.mapRect(rectPreview)
-
-        sv!!.layoutParams.height = rectPreview.bottom.toInt()
-        sv!!.layoutParams.width = rectPreview.top.toInt()
+        cameraExecutor = Executors.newSingleThreadExecutor()
     }
 
-    fun setCameraDisplayOrierantion(cameraId: Int) {
-        var rotaion = windowManager.defaultDisplay.rotation
+    private fun takePhoto() {
+        // Get a stable reference of the modifiable image capture use case
+        val imageCapture = imageCapture ?: return
 
-        var degres = 0
-
-        when (rotaion) {
-            Surface.ROTATION_0 -> degres = 0
-            Surface.ROTATION_90 -> degres = 90
-            Surface.ROTATION_180 -> degres = 180
-            Surface.ROTATION_270 -> degres = 270
-        }
-
-        var result = 0
-
-        var info: CameraInfo = CameraInfo()
-        Camera.getCameraInfo(cameraId, info)
-
-        if (info.facing == CameraInfo.CAMERA_FACING_BACK) {
-            result = ((360 - degres) + info.orientation)
-        } else if (info.facing == CameraInfo.CAMERA_FACING_FRONT){
-            result = ((360 - degres) - info.orientation)
-            result += 360
-        }
-
-        result %= 360
-        camera?.setDisplayOrientation(result)
-    }
-
-    class HolderCallback(private val activity: MainActivity): SurfaceHolder.Callback {
-        override fun surfaceCreated(p0: SurfaceHolder) {
-            try {
-                activity.camera!!.setPreviewDisplay(p0)
-                activity.camera!!.startPreview()
-            } catch (e: IOException) {
-                e.printStackTrace()
+        // Create time stamped name and MediaStore entry.
+        val name = SimpleDateFormat(FILENAME_FORMAT, Locale.US)
+            .format(System.currentTimeMillis())
+        val contentValues = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+            put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
+            if(Build.VERSION.SDK_INT > Build.VERSION_CODES.P) {
+                put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/CameraX-Image")
             }
         }
 
-        override fun surfaceChanged(p0: SurfaceHolder, p1: Int, p2: Int, p3: Int) {
-            activity.camera!!.stopPreview()
-            activity.setCameraDisplayOrierantion(activity.cameraId)
+        // Create output options object which contains file + metadata
+        val outputOptions = ImageCapture.OutputFileOptions
+            .Builder(contentResolver,
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                contentValues)
+            .build()
 
-            try {
-                activity.camera!!.setPreviewDisplay(p0)
-                activity.camera!!.startPreview()
-            } catch (e: Exception) {
-                e.printStackTrace()
+        // Set up image capture listener, which is triggered after photo has
+        // been taken
+        imageCapture.takePicture(
+            outputOptions,
+            ContextCompat.getMainExecutor(this),
+            object : ImageCapture.OnImageSavedCallback {
+                override fun onError(exc: ImageCaptureException) {
+                    Log.e(TAG, "Photo capture failed: ${exc.message}", exc)
+                }
+
+                override fun
+                        onImageSaved(output: ImageCapture.OutputFileResults){
+                    val msg = "Photo capture succeeded: ${output.savedUri}"
+                    Toast.makeText(baseContext, msg, Toast.LENGTH_SHORT).show()
+                    Log.d(TAG, msg)
+                }
+            }
+        )
+    }
+
+    // Implements VideoCapture use case, including start and stop capturing.
+    private fun captureVideo() {
+        val videoCapture = this.videoCapture ?: return
+
+        viewBinding.videoCaptureButton.isEnabled = false
+
+        val curRecording = recording
+        if (curRecording != null) {
+            // Stop the current recording session.
+            curRecording.stop()
+            recording = null
+            return
+        }
+
+        // create and start a new recording session
+        val name = SimpleDateFormat(FILENAME_FORMAT, Locale.US)
+            .format(System.currentTimeMillis())
+        val contentValues = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+            put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
+            if (Build.VERSION.SDK_INT > Build.VERSION_CODES.P) {
+                put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/CameraX-Video")
             }
         }
 
-        override fun surfaceDestroyed(p0: SurfaceHolder) {
+        val mediaStoreOutputOptions = MediaStoreOutputOptions
+            .Builder(contentResolver, MediaStore.Video.Media.EXTERNAL_CONTENT_URI)
+            .setContentValues(contentValues)
+            .build()
+        recording = videoCapture.output
+            .prepareRecording(this, mediaStoreOutputOptions)
+            .apply {
+                if (PermissionChecker.checkSelfPermission(this@MainActivity,
+                        Manifest.permission.RECORD_AUDIO) ==
+                    PermissionChecker.PERMISSION_GRANTED)
+                {
+                    withAudioEnabled()
+                }
+            }
+            .start(ContextCompat.getMainExecutor(this)) { recordEvent ->
+                when(recordEvent) {
+                    is VideoRecordEvent.Start -> {
+                        viewBinding.videoCaptureButton.apply {
+                            text = getString(R.string.stop_capture)
+                            isEnabled = true
+                        }
+                    }
+                    is VideoRecordEvent.Finalize -> {
+                        if (!recordEvent.hasError()) {
+                            val msg = "Video capture succeeded: " +
+                                    "${recordEvent.outputResults.outputUri}"
+                            Toast.makeText(baseContext, msg, Toast.LENGTH_SHORT)
+                                .show()
+                            Log.d(TAG, msg)
+                        } else {
+                            recording?.close()
+                            recording = null
+                            Log.e(TAG, "Video capture ends with error: " +
+                                    "${recordEvent.error}")
+                        }
+                        viewBinding.videoCaptureButton.apply {
+                            text = getString(R.string.start_capture)
+                            isEnabled = true
+                        }
+                    }
+                }
+            }
+    }
 
-        }
+    private fun startCamera() {
+        val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
+
+        cameraProviderFuture.addListener({
+            // Used to bind the lifecycle of cameras to the lifecycle owner
+            val cameraProvider: ProcessCameraProvider = cameraProviderFuture.get()
+
+            // Preview
+            val preview = Preview.Builder()
+                .build()
+                .also {
+                    it.setSurfaceProvider(viewBinding.viewFinder.surfaceProvider)
+                }
+
+            val recorder = Recorder.Builder()
+                .setQualitySelector(QualitySelector.from(Quality.HIGHEST))
+                .build()
+            videoCapture = VideoCapture.withOutput(recorder)
+
+            // Select back camera as a default
+            val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
+
+            try {
+                // Unbind use cases before rebinding
+                cameraProvider.unbindAll()
+
+                // Bind use cases to camera
+                cameraProvider
+                    .bindToLifecycle(this, cameraSelector, preview, videoCapture)
+            } catch(exc: Exception) {
+                Log.e(TAG, "Use case binding failed", exc)
+            }
+
+        }, ContextCompat.getMainExecutor(this))
+    }
+
+    private fun requestPermissions() {
+        activityResultLauncher.launch(REQUIRED_PERMISSIONS)
+    }
+
+    private fun allPermissionsGranted() = REQUIRED_PERMISSIONS.all {
+        ContextCompat.checkSelfPermission(
+            baseContext, it) == PackageManager.PERMISSION_GRANTED
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        cameraExecutor.shutdown()
     }
 
 
+
+    companion object {
+        private const val TAG = "CameraXApp"
+        private const val FILENAME_FORMAT = "yyyy-MM-dd-HH-mm-ss-SSS"
+        private val REQUIRED_PERMISSIONS =
+            mutableListOf (
+                Manifest.permission.CAMERA,
+                Manifest.permission.RECORD_AUDIO
+            ).apply {
+                if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P) {
+                    add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                }
+            }.toTypedArray()
+    }
 }
